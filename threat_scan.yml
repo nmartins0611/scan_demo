@@ -27,6 +27,8 @@
     save_raw_results_to: ""
     # When true, the play fails if true positive findings are detected (useful for CI/CD gates)
     fail_on_findings: false
+    # When true, generates an HTML report on the controller
+    generate_html_report: true
     known_false_positive_patterns:
       - "shai_hulud.yar"
       - "Application Support/Slack/IndexedDB"
@@ -134,7 +136,7 @@
 
     - name: Classify findings into true positives and false positives
       ansible.builtin.set_fact:
-        all_findings: "{{ _parsed | from_json }}"
+        all_findings: "{{ _parsed if _parsed is not string else (_parsed | from_json) }}"
       vars:
         _parsed: >-
           [{% for line in scan_findings %}{% set parts = line.split(None, 1) %}{% if parts | length == 2 %}{"rule": {{ parts[0] | to_json }}, "path": {{ parts[1] | to_json }}, "is_false_positive": {{ (known_false_positive_patterns | select('in', parts[1]) | list | length > 0) | to_json }}}{% if not loop.last %},{% endif %}{% endif %}{% endfor %}]
@@ -161,6 +163,7 @@
       delegate_to: localhost
       become: false
       run_once: true
+      when: generate_html_report | bool
       vars:
         scan_timestamp: "{{ ansible_facts['date_time']['iso8601'] }}"
         host_results: "{{ ansible_play_hosts | map('extract', hostvars, 'host_scan_result') | list }}"
@@ -177,7 +180,9 @@
       delegate_to: localhost
       become: false
       run_once: true
-      when: save_raw_results_to | length > 0
+      when:
+        - generate_html_report | bool
+        - save_raw_results_to | length > 0
 
     - name: Save per-host raw results to artifact directory
       ansible.builtin.fetch:
