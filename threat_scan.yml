@@ -197,8 +197,7 @@
         data:
           threat_scan_summary:
             scan_date: "{{ ansible_facts['date_time']['iso8601'] }}"
-            total_hosts_scanned: "{{ ansible_play_hosts | length }}"
-            hosts_with_findings: "{{ ansible_play_hosts | map('extract', hostvars, 'host_scan_result') | selectattr('true_findings', 'ne', []) | list | length }}"
+            hostname: "{{ inventory_hostname }}"
             total_true_positives: "{{ all_findings | selectattr('is_false_positive', 'equalto', false) | list | length }}"
             total_false_positives: "{{ all_findings | selectattr('is_false_positive', 'equalto', true) | list | length }}"
             findings: "{{ all_findings | selectattr('is_false_positive', 'equalto', false) | list }}"
