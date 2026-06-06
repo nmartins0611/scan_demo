@@ -122,7 +122,7 @@ AAP API:
     "total_true_positives": 2,
     "total_false_positives": 1,
     "findings": [
-      {"rule": "ShaiHulud_TmpPayload", "path": "/home/user/repos/project/.claude/index.js", "is_false_positive": false}
+      {"rule": "ShaiHulud_TmpPayload", "path": "/home/user/repos/project/tmp/index.js", "is_false_positive": false}
     ],
     "status": "THREATS_DETECTED"
   }
