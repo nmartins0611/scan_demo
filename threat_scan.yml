@@ -1,0 +1,266 @@
+---
+- name: Shai-Hulud YARA Threat Scan
+  hosts: all
+  become: true
+  gather_facts: true
+  serial: "{{ scan_serial | default(1) }}"
+
+  vars:
+    yara_rules_url: "https://raw.githubusercontent.com/Red-Hat-Information-Security/Incident-Response/refs/heads/main/shai_hulud.yar"
+    yara_rules_checksum: "sha256:ec9d7cf13acf165c4a213ed6c60927b9aed1cb4283655b06b111e3f997e696c9"
+    yara_rules_dest: "/tmp/shai_hulud.yar"
+    # Set this to the absolute path of a pre-downloaded shai_hulud.yar to skip the download step
+    yara_rules_local_path: ""
+    scan_paths:
+      - "{{ ansible_facts['env']['HOME'] }}"
+    # When true, auto-discovers all user home directories under /home
+    scan_all_users: false
+    # Paths to exclude from scanning (substring match against full path)
+    scan_exclude_paths:
+      - ".local/share/containers"
+      - ".cache"
+      - "node_modules"
+      - ".venv"
+    scan_output_file: "{{ ansible_facts['env']['HOME'] }}/shai_hulud-scan.txt"
+    report_dest: "./threat_scan_report_{{ ansible_facts['date_time']['date'] }}.html"
+    # Set to a directory path to save per-host raw scan text files (AAP artifact dir support)
+    save_raw_results_to: ""
+    # When true, the play fails if true positive findings are detected (useful for CI/CD gates)
+    fail_on_findings: false
+    known_false_positive_patterns:
+      - "shai_hulud.yar"
+      - "Application Support/Slack/IndexedDB"
+
+  tasks:
+    - name: Validate target OS family
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == "RedHat"
+        fail_msg: "This playbook only supports Red Hat family systems (RHEL, Fedora). Detected: {{ ansible_facts['os_family'] }}"
+        quiet: true
+
+    - name: Discover all user home directories
+      ansible.builtin.find:
+        paths: /home
+        file_type: directory
+        recurse: false
+      register: _home_dirs
+      when: scan_all_users | bool
+
+    - name: Build scan path list with all users
+      ansible.builtin.set_fact:
+        scan_paths: "{{ _home_dirs.files | map(attribute='path') | list }}"
+      when: scan_all_users | bool
+
+    - name: Build YARA exclude arguments
+      ansible.builtin.set_fact:
+        _yara_exclude_args: "{{ scan_exclude_paths | map('regex_replace', '^(.*)$', '-x \"\\1\"') | join(' ') }}"
+
+    - name: Install yara package
+      ansible.builtin.dnf:
+        name: yara
+        state: present
+
+    - name: Copy pre-downloaded YARA rules file
+      ansible.builtin.copy:
+        src: "{{ yara_rules_local_path }}"
+        dest: "{{ yara_rules_dest }}"
+        mode: "0644"
+      when: yara_rules_local_path | length > 0
+
+    - name: Download YARA rules file
+      ansible.builtin.get_url:
+        url: "{{ yara_rules_url }}"
+        dest: "{{ yara_rules_dest }}"
+        checksum: "{{ yara_rules_checksum }}"
+        mode: "0644"
+      when: yara_rules_local_path | length == 0
+
+    - name: Clear previous scan results
+      ansible.builtin.file:
+        path: "{{ scan_output_file }}"
+        state: absent
+
+    - name: Run YARA scan on each path
+      ansible.builtin.shell:
+        cmd: >-
+          yara {{ yara_rules_dest }} -r '{{ item }}'
+          >> '{{ scan_output_file }}'
+          2>> '{{ scan_output_file }}.errors'
+      loop: "{{ scan_paths }}"
+      register: yara_scan_results
+      failed_when: false
+      changed_when: false
+      become: false
+
+    - name: Filter out excluded paths from results
+      ansible.builtin.shell:
+        cmd: >-
+          {% for pattern in scan_exclude_paths %}
+          grep -v '{{ pattern }}' '{{ scan_output_file }}' > '{{ scan_output_file }}.tmp'
+          && mv '{{ scan_output_file }}.tmp' '{{ scan_output_file }}';
+          {% endfor %}
+          true
+      failed_when: false
+      changed_when: false
+      when: scan_exclude_paths | length > 0
+
+    - name: Read scan results
+      ansible.builtin.slurp:
+        src: "{{ scan_output_file }}"
+      register: scan_results_raw
+      failed_when: false
+
+    - name: Read scan errors
+      ansible.builtin.slurp:
+        src: "{{ scan_output_file }}.errors"
+      register: scan_errors_raw
+      failed_when: false
+
+    - name: Parse scan findings
+      ansible.builtin.set_fact:
+        scan_findings: >-
+          {{
+            (scan_results_raw.content | default('') | b64decode).split('\n')
+            | select('match', '.+ .+')
+            | list
+          }}
+        scan_errors: >-
+          {{
+            (scan_errors_raw.content | default('') | b64decode).split('\n')
+            | select('match', '.+')
+            | list
+          }}
+
+    - name: Classify findings into true positives and false positives
+      ansible.builtin.set_fact:
+        all_findings: "{{ _parsed | from_json }}"
+      vars:
+        _parsed: >-
+          [{% for line in scan_findings %}{% set parts = line.split(None, 1) %}{% if parts | length == 2 %}{"rule": {{ parts[0] | to_json }}, "path": {{ parts[1] | to_json }}, "is_false_positive": {{ (known_false_positive_patterns | select('in', parts[1]) | list | length > 0) | to_json }}}{% if not loop.last %},{% endif %}{% endif %}{% endfor %}]
+
+    - name: Build per-host result structure
+      ansible.builtin.set_fact:
+        host_scan_result:
+          hostname: "{{ inventory_hostname }}"
+          os_family: "{{ ansible_facts['distribution'] }}"
+          os_version: "{{ ansible_facts['distribution_version'] }}"
+          kernel: "{{ ansible_facts['kernel'] }}"
+          scan_user: "{{ ansible_facts['env']['USER'] | default(ansible_facts['user_id']) }}"
+          all_findings: "{{ all_findings }}"
+          true_findings: "{{ all_findings | selectattr('is_false_positive', 'equalto', false) | list }}"
+          false_positives: "{{ all_findings | selectattr('is_false_positive', 'equalto', true) | list }}"
+          scan_errors: "{{ scan_errors }}"
+          scan_paths: "{{ scan_paths }}"
+
+    - name: Generate HTML report
+      ansible.builtin.template:
+        src: templates/threat_scan_report.html.j2
+        dest: "{{ report_dest }}"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      vars:
+        scan_timestamp: "{{ ansible_facts['date_time']['iso8601'] }}"
+        host_results: "{{ ansible_play_hosts | map('extract', hostvars, 'host_scan_result') | list }}"
+        hosts_clean: "{{ host_results | selectattr('true_findings', 'equalto', []) | list }}"
+        hosts_with_findings: "{{ host_results | rejectattr('true_findings', 'equalto', []) | list }}"
+        total_findings: "{{ host_results | map(attribute='true_findings') | map('length') | sum }}"
+        total_false_positives: "{{ host_results | map(attribute='false_positives') | map('length') | sum }}"
+
+    - name: Copy HTML report to artifact directory
+      ansible.builtin.copy:
+        src: "{{ report_dest }}"
+        dest: "{{ save_raw_results_to }}/threat_scan_report_{{ ansible_facts['date_time']['date'] }}.html"
+        mode: "0644"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: save_raw_results_to | length > 0
+
+    - name: Save per-host raw results to artifact directory
+      ansible.builtin.fetch:
+        src: "{{ scan_output_file }}"
+        dest: "{{ save_raw_results_to }}/{{ inventory_hostname }}_shai_hulud-scan.txt"
+        flat: true
+      when: save_raw_results_to | length > 0
+      failed_when: false
+
+    - name: Publish scan summary to AAP job stats
+      ansible.builtin.set_stats:
+        data:
+          threat_scan_summary:
+            scan_date: "{{ ansible_facts['date_time']['iso8601'] }}"
+            total_hosts_scanned: "{{ ansible_play_hosts | length }}"
+            hosts_with_findings: "{{ ansible_play_hosts | map('extract', hostvars, 'host_scan_result') | selectattr('true_findings', 'ne', []) | list | length }}"
+            total_true_positives: "{{ all_findings | selectattr('is_false_positive', 'equalto', false) | list | length }}"
+            total_false_positives: "{{ all_findings | selectattr('is_false_positive', 'equalto', true) | list | length }}"
+            findings: "{{ all_findings | selectattr('is_false_positive', 'equalto', false) | list }}"
+            status: "{{ 'THREATS_DETECTED' if (all_findings | selectattr('is_false_positive', 'equalto', false) | list | length > 0) else 'CLEAN' }}"
+        per_host: true
+      run_once: false
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg: |
+          === Shai-Hulud Scan Summary for {{ inventory_hostname }} ===
+          Scanned paths: {{ scan_paths | join(', ') }}
+          Total findings: {{ all_findings | length }}
+          True positives: {{ all_findings | selectattr('is_false_positive', 'equalto', false) | list | length }}
+          False positives: {{ all_findings | selectattr('is_false_positive', 'equalto', true) | list | length }}
+          Scan errors: {{ scan_errors | length }}
+          {% if all_findings | selectattr('is_false_positive', 'equalto', false) | list | length > 0 %}
+          *** ACTION REQUIRED: True positive findings detected! ***
+          {% for f in all_findings | selectattr('is_false_positive', 'equalto', false) | list %}
+            - {{ f.rule }}: {{ f.path }}
+          {% endfor %}
+          {% endif %}
+
+    - name: Display raw scan output for attachment
+      ansible.builtin.debug:
+        msg: |
+          === Raw Scan Output for {{ inventory_hostname }} (copy/paste for attachment) ===
+          Host: {{ inventory_hostname }}
+          OS: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
+          Scan date: {{ ansible_facts['date_time']['iso8601'] }}
+          Scanned paths: {{ scan_paths | join(', ') }}
+          ---
+          {% if scan_findings | length > 0 %}
+          {% for line in scan_findings %}
+          {{ line }}
+          {% endfor %}
+          {% else %}
+          No findings.
+          {% endif %}
+          ---
+          Report saved to: {{ report_dest }}
+
+    - name: Clean up YARA rules file
+      ansible.builtin.file:
+        path: "{{ yara_rules_dest }}"
+        state: absent
+      when: yara_rules_local_path | length == 0
+
+    - name: Clean up scan error log
+      ansible.builtin.file:
+        path: "{{ scan_output_file }}.errors"
+        state: absent
+
+    - name: Report file locations
+      ansible.builtin.debug:
+        msg: |
+          === Scan Complete ===
+          HTML report: {{ report_dest }}
+          {% if save_raw_results_to | length > 0 %}
+          Artifact directory: {{ save_raw_results_to }}/
+          {% endif %}
+          Remote scan output (on target): {{ scan_output_file }}
+      run_once: true
+
+    - name: Fail play if threats detected and fail_on_findings is enabled
+      ansible.builtin.fail:
+        msg: "True positive threat findings detected on {{ inventory_hostname }}. Review the report for details."
+      when:
+        - fail_on_findings | bool
+        - all_findings | selectattr('is_false_positive', 'equalto', false) | list | length > 0
