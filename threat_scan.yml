@@ -205,41 +205,6 @@
         per_host: true
       run_once: false
 
-    - name: Display summary
-      ansible.builtin.debug:
-        msg: |
-          === Shai-Hulud Scan Summary for {{ inventory_hostname }} ===
-          Scanned paths: {{ scan_paths | join(', ') }}
-          Total findings: {{ all_findings | length }}
-          True positives: {{ all_findings | selectattr('is_false_positive', 'equalto', false) | list | length }}
-          False positives: {{ all_findings | selectattr('is_false_positive', 'equalto', true) | list | length }}
-          Scan errors: {{ scan_errors | length }}
-          {% if all_findings | selectattr('is_false_positive', 'equalto', false) | list | length > 0 %}
-          *** ACTION REQUIRED: True positive findings detected! ***
-          {% for f in all_findings | selectattr('is_false_positive', 'equalto', false) | list %}
-            - {{ f.rule }}: {{ f.path }}
-          {% endfor %}
-          {% endif %}
-
-    - name: Display raw scan output for attachment
-      ansible.builtin.debug:
-        msg: |
-          === Raw Scan Output for {{ inventory_hostname }} (copy/paste for attachment) ===
-          Host: {{ inventory_hostname }}
-          OS: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
-          Scan date: {{ ansible_facts['date_time']['iso8601'] }}
-          Scanned paths: {{ scan_paths | join(', ') }}
-          ---
-          {% if scan_findings | length > 0 %}
-          {% for line in scan_findings %}
-          {{ line }}
-          {% endfor %}
-          {% else %}
-          No findings.
-          {% endif %}
-          ---
-          Report saved to: {{ report_dest }}
-
     - name: Clean up YARA rules file
       ansible.builtin.file:
         path: "{{ yara_rules_dest }}"
@@ -251,16 +216,51 @@
         path: "{{ scan_output_file }}.errors"
         state: absent
 
-    - name: Report file locations
+    - name: Remove yara package
+      ansible.builtin.dnf:
+        name: yara
+        state: absent
+
+    - name: Display scan results
       ansible.builtin.debug:
         msg: |
-          === Scan Complete ===
-          HTML report: {{ report_dest }}
-          {% if save_raw_results_to | length > 0 %}
-          Artifact directory: {{ save_raw_results_to }}/
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║  SHAI-HULUD YARA SCAN RESULTS - {{ inventory_hostname }}
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  Host: {{ inventory_hostname }}
+          ║  OS: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
+          ║  Kernel: {{ ansible_facts['kernel'] }}
+          ║  Scan User: {{ ansible_facts['env']['USER'] | default(ansible_facts['user_id']) }}
+          ║  Scan Date: {{ ansible_facts['date_time']['iso8601'] }}
+          ║  Scanned Paths: {{ scan_paths | join(', ') }}
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  SUMMARY
+          ║  Total findings: {{ all_findings | length }}
+          ║  True positives: {{ all_findings | selectattr('is_false_positive', 'equalto', false) | list | length }}
+          ║  False positives: {{ all_findings | selectattr('is_false_positive', 'equalto', true) | list | length }}
+          ║  Scan errors: {{ scan_errors | length }}
+          ╠══════════════════════════════════════════════════════════════════╣
+          {% if all_findings | selectattr('is_false_positive', 'equalto', false) | list | length > 0 %}
+          ║  *** ACTION REQUIRED: True positive findings detected! ***
+          ║
+          {% for f in all_findings | selectattr('is_false_positive', 'equalto', false) | list %}
+          ║  [THREAT] {{ f.rule }} : {{ f.path }}
+          {% endfor %}
           {% endif %}
-          Remote scan output (on target): {{ scan_output_file }}
-      run_once: true
+          {% if all_findings | selectattr('is_false_positive', 'equalto', true) | list | length > 0 %}
+          ║
+          ║  Known false positives (no action needed):
+          {% for f in all_findings | selectattr('is_false_positive', 'equalto', true) | list %}
+          ║  [FP] {{ f.rule }} : {{ f.path }}
+          {% endfor %}
+          {% endif %}
+          {% if all_findings | length == 0 %}
+          ║
+          ║  ✓ NO THREATS DETECTED - Host is clean.
+          {% endif %}
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║  STATUS: {{ 'THREATS_DETECTED' if (all_findings | selectattr('is_false_positive', 'equalto', false) | list | length > 0) else 'CLEAN' }}
+          ╚══════════════════════════════════════════════════════════════════╝
 
     - name: Fail play if threats detected and fail_on_findings is enabled
       ansible.builtin.fail:
