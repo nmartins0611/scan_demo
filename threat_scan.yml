@@ -3,7 +3,7 @@
   hosts: all
   become: true
   gather_facts: true
-  serial: "{{ scan_serial | default(1) }}"
+  serial: "{{ scan_serial | default(0) }}"
 
   vars:
     yara_rules_url: "https://raw.githubusercontent.com/Red-Hat-Information-Security/Incident-Response/refs/heads/main/shai_hulud.yar"
@@ -21,7 +21,7 @@
       - ".cache"
       - "node_modules"
       - ".venv"
-    scan_output_file: "{{ ansible_facts['env']['HOME'] }}/shai_hulud-scan.txt"
+    scan_output_file: "/tmp/shai_hulud-scan.txt"
     report_dest: "./threat_scan_report_{{ ansible_facts['date_time']['date'] }}.html"
     # Set to a directory path to save per-host raw scan text files (AAP artifact dir support)
     save_raw_results_to: ""
@@ -94,6 +94,16 @@
       failed_when: false
       changed_when: false
       become: false
+
+    - name: Ensure scan output files exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: touch
+        mode: "0644"
+      loop:
+        - "{{ scan_output_file }}"
+        - "{{ scan_output_file }}.errors"
+      changed_when: false
 
     - name: Filter out excluded paths from results
       ansible.builtin.shell:

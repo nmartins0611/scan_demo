@@ -31,9 +31,10 @@ Override variables at runtime or in your inventory:
 | `scan_paths` | `["$HOME"]` | List of directories to scan recursively |
 | `scan_all_users` | `false` | When `true`, auto-discovers all `/home/*` directories to scan |
 | `scan_exclude_paths` | `[".local/share/containers", ".cache", "node_modules", ".venv"]` | Substrings to exclude from results |
-| `scan_serial` | `1` | Number of hosts to scan at a time (serial execution for fleet safety) |
+| `scan_serial` | `0` (all at once) | Number of hosts to scan at a time; `0` = parallel, `1` = one at a time |
 | `save_raw_results_to` | `""` | Directory to save HTML report and per-host text files (artifact directory) |
 | `report_dest` | `./threat_scan_report_<date>.html` | Where to write the HTML report (on controller) |
+| `generate_html_report` | `true` | When `false`, skips HTML report generation |
 | `fail_on_findings` | `false` | Fail the play if true positive findings are detected (CI/CD gate) |
 | `yara_rules_url` | GitHub raw URL | Source for the YARA rules file |
 | `yara_rules_checksum` | `sha256:ec9d7c...` | Expected checksum of the rules file |
@@ -64,10 +65,15 @@ ansible-playbook threat_scan.yml -i inventory.ini \
 
 ### Running against a fleet
 
-The playbook runs in serial mode by default (one host at a time) to avoid
-overwhelming the network or targets. Increase parallelism with `scan_serial`:
+The playbook runs all hosts in parallel by default. To throttle execution
+across a large fleet, set `scan_serial`:
 
 ```bash
+# Run one host at a time (serial)
+ansible-playbook threat_scan.yml -i inventory.ini \
+  -e 'scan_serial=1' \
+  --ask-become-pass
+
 # Scan 5 hosts at a time
 ansible-playbook threat_scan.yml -i inventory.ini \
   -e 'scan_serial=5' \
@@ -140,6 +146,7 @@ AAP API:
      save_raw_results_to: /tmp/artifacts
      scan_all_users: true
      fail_on_findings: true
+     generate_html_report: false
      ```
 3. Optionally add a **Survey** to let users override `scan_paths` or `scan_serial`
 
